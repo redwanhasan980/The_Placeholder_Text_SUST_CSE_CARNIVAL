@@ -27,11 +27,25 @@ WRONG_TRANSFER_KEYWORDS = [
     "wrong person",
     "wrong recipient",
     "wrong account",
+    "vul number",
+    "vul nambar",
+    "vul nambare",
+    "bhul number",
+    "bhul nambar",
+    "bhul nambare",
+    "vaul number",
+    "vaul nambar",
     "typed it wrong",
     "by mistake",
     "mistake",
     "reverse it",
+    "reverse",
     "sent to",
+    "pathaisi",
+    "pathaise",
+    "pathalam",
+    "pathailam",
+    "pataisi",
     "didn't get it",
     "did not get it",
     "not received",
@@ -117,7 +131,7 @@ def classify_case(request: AnalyzeTicketRequest, facts: TextFacts) -> tuple[Case
     if has_any(text, PAYMENT_FAILED_KEYWORDS) and has_any(text, ["payment", "pay", "paid", "recharge", "bill", "deducted", "balance", "পেমেন্ট"]):
         return CaseType.payment_failed, ["payment_failed"], 0.88
 
-    if has_any(text, WRONG_TRANSFER_KEYWORDS) and has_any(text, ["sent", "transfer", "person", "number", "recipient", "brother", "reverse", "পাঠ", "নাম্বার", "নম্বর"]):
+    if has_any(text, WRONG_TRANSFER_KEYWORDS) and has_any(text, ["sent", "transfer", "person", "number", "nambar", "nambare", "recipient", "brother", "reverse", "patha", "pata", "পাঠ", "নাম্বার", "নম্বর"]):
         return CaseType.wrong_transfer, ["wrong_transfer"], 0.86
 
     if has_any(text, REFUND_KEYWORDS):

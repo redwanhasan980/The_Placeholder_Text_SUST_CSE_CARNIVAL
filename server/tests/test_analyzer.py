@@ -37,7 +37,21 @@ class AnalyzerSafetyTests(unittest.TestCase):
         self.assertIsNone(response.relevant_transaction_id)
         self.assertEqual(response.evidence_verdict, "insufficient_data")
 
+    def test_banglish_wrong_transfer_spelling(self):
+        response = self.analyze(
+            {
+                "ticket_id": "TKT-BANGLISH",
+                "complaint": "ami 1000 taka vul nambare pathaisi, pls reverse",
+                "language": "mixed",
+                "transaction_history": [
+                    {"transaction_id": "TXN-B1", "timestamp": "2026-04-14T10:00:00Z", "type": "transfer", "amount": 1000, "counterparty": "+8801711111111", "status": "completed"}
+                ],
+            }
+        )
+        self.assertEqual(response.case_type, "wrong_transfer")
+        self.assertEqual(response.department, "dispute_resolution")
+        self.assertEqual(response.relevant_transaction_id, "TXN-B1")
+
 
 if __name__ == "__main__":
     unittest.main()
-

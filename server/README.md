@@ -11,7 +11,7 @@ GET /health
 POST /analyze-ticket
 ```
 
-The implementation is rule-first: deterministic evidence matching, deterministic routing, safe customer reply templates, and final Pydantic schema validation. Groq is kept as an optional future helper for language extraction, not as the source of truth.
+The implementation is hybrid: deterministic evidence matching, deterministic routing, safe customer reply templates, optional Groq LLM assistance for low-confidence cases, and final Pydantic schema validation.
 
 ## Run Locally
 
@@ -53,18 +53,59 @@ Default mode:
 USE_LLM=false
 ```
 
-The current scoring path does not require an external model. This avoids timeouts, quota failure, schema drift, and unsafe free-form replies.
+The scoring path works without an external model. When `USE_LLM=true`, the backend calls Groq only if the rule engine confidence is below the configured threshold.
 
 Optional model plan:
 
 ```text
 Provider: Groq
 Model: openai/gpt-oss-20b
-Use: internal extraction hints for messy Bangla/Banglish complaints
+Use: low-confidence decision assistance for messy English, Bangla, Banglish, spelling mistakes, and ambiguous complaints
 Fallback: deterministic rules
 ```
 
-The LLM must never directly choose final enum values or write the final customer reply without validation.
+The LLM receives the full ticket context, transaction history, preliminary rule decision, taxonomy, evidence rules, and fintech safety rules. It returns a strict JSON proposal. The backend may accept parts of that proposal, but final schema validation, department mapping, and safety sanitation remain deterministic.
+
+Useful `.env` controls:
+
+```text
+USE_LLM=true
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-20b
+confidence=0.75
+LLM_MIN_ACCEPT_CONFIDENCE=0.55
+LLM_TIMEOUT_SECONDS=4
+```
+
+If the rule confidence is below `confidence`, the LLM assist layer is called. If the LLM confidence is below `LLM_MIN_ACCEPT_CONFIDENCE`, its decision is ignored.
+
+## Debug Logging
+
+Detailed per-ticket logging can be enabled from `.env`:
+
+```text
+DEBUG_LOG_ENABLED=true
+DEBUG_LOG_TO_CONSOLE=true
+DEBUG_LOG_FILE=logs/decision_debug.log
+DEBUG_LOG_LLM_PROMPT=true
+DEBUG_LOG_LLM_OUTPUT=true
+```
+
+The log shows:
+
+```text
+request metadata and complaint
+normalized extracted facts
+rule-engine decision
+LLM gate decision
+full LLM prompt messages, if enabled
+raw LLM output, if enabled
+parsed LLM decision
+accepted/rejected LLM fields
+final response
+```
+
+Logs may include synthetic complaint text and LLM output. Do not enable verbose logs for real customer data.
 
 ## Safety Logic
 
@@ -82,4 +123,3 @@ Unsafe text is replaced or sanitized before the response is returned.
 ## Known Limitations
 
 The system is optimized for the provided taxonomy and synthetic judging data. It does not integrate with real payment systems, account balances, fraud databases, or merchant APIs. Bangla/Banglish handling is keyword-based and intentionally conservative.
-
