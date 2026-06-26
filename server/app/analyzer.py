@@ -25,16 +25,16 @@ DEPARTMENT_BY_CASE = {
 def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
     logger = DecisionLogger(request.ticket_id)
     logger.step(
-        "request_received",
+        "request_data",
         {
-            "ticket_id": request.ticket_id,
-            "language": request.language,
-            "channel": request.channel,
-            "user_type": request.user_type,
+            "request": _model_to_dict(request),
             "transaction_count": len(request.transaction_history or []),
-            "complaint": request.complaint,
-            "llm_enabled": settings.use_llm,
-            "confidence_threshold": settings.confidence_threshold,
+            "runtime": {
+                "llm_enabled": settings.use_llm,
+                "confidence_threshold": settings.confidence_threshold,
+                "llm_min_accept_confidence": settings.llm_min_accept_confidence,
+                "groq_model": settings.groq_model,
+            },
         },
     )
 
@@ -62,6 +62,14 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
     human_review = decide_human_review(case_type, verdict, severity, match)
     confidence = _confidence(classification_confidence, verdict, match)
     llm_texts: dict[str, str] = {}
+    llm_status = {
+        "sent_to_llm": False,
+        "status": "skipped",
+        "reason": "LLM gate has not been evaluated yet.",
+        "parsed": False,
+        "error": None,
+        "plain_text_response": "",
+    }
 
     rule_snapshot = _decision_snapshot(
         case_type=case_type,
@@ -73,9 +81,19 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
         confidence=confidence,
         reason_codes=classification_reasons + match.reason_codes,
     )
-    logger.step("rule_engine_decision", rule_snapshot)
+    logger.step(
+        "rule_based_decision",
+        {
+            "classification_confidence": classification_confidence,
+            "classification_reasons": classification_reasons,
+            "decision": rule_snapshot,
+        },
+    )
 
     should_call_llm = settings.use_llm and confidence < settings.confidence_threshold
+    llm_status["sent_to_llm"] = should_call_llm
+    if not should_call_llm:
+        llm_status["reason"] = "Rule confidence is high enough or USE_LLM is disabled."
     logger.step(
         "llm_gate",
         {
@@ -88,14 +106,35 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
 
     if should_call_llm:
         llm_result = request_llm_decision(request, facts, rule_snapshot)
-        if settings.debug_log_llm_prompt:
-            logger.step("llm_prompt_messages", {"messages": llm_result.messages or []})
-        if llm_result.error:
-            logger.step("llm_error", {"error": llm_result.error})
-        if settings.debug_log_llm_output:
-            logger.step("llm_raw_output", {"raw_output": llm_result.raw_output})
+        llm_status.update(
+            {
+                "status": "success" if llm_result.decision else "failed",
+                "reason": "LLM returned a valid parsed decision." if llm_result.decision else "LLM did not return a usable parsed decision.",
+                "parsed": bool(llm_result.decision),
+                "error": llm_result.error,
+                "plain_text_response": llm_result.raw_output,
+            }
+        )
+        logger.step(
+            "llm_prompt",
+            {
+                "sent_to_llm": True,
+                "prompt_logging_enabled": settings.debug_log_llm_prompt,
+                "messages": llm_result.messages or [] if settings.debug_log_llm_prompt else None,
+            },
+        )
+        logger.step(
+            "llm_response",
+            {
+                "sent_to_llm": True,
+                "status": llm_status["status"],
+                "output_logging_enabled": settings.debug_log_llm_output,
+                "plain_text_response": llm_result.raw_output if settings.debug_log_llm_output else None,
+                "error": llm_result.error,
+                "parsed_decision": llm_result.decision,
+            },
+        )
         if llm_result.decision:
-            logger.step("llm_parsed_decision", {"decision": llm_result.decision})
             (
                 case_type,
                 match,
@@ -120,6 +159,25 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
                 llm_decision=llm_result.decision,
                 logger=logger,
             )
+    else:
+        logger.step(
+            "llm_prompt",
+            {
+                "sent_to_llm": False,
+                "messages": None,
+                "reason": "Rule confidence is high enough or USE_LLM is disabled.",
+            },
+        )
+        logger.step(
+            "llm_response",
+            {
+                "sent_to_llm": False,
+                "status": llm_status["status"],
+                "plain_text_response": None,
+                "parsed_decision": None,
+                "error": None,
+            },
+        )
 
     reason_codes = _dedupe(classification_reasons + match.reason_codes + _verdict_reason_codes(verdict, case_type, match))
     summary, next_action, customer_reply = build_texts(request, case_type, verdict, match.transaction, reason_codes)
@@ -131,6 +189,23 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
 
     customer_reply, next_action, safety_reasons = sanitize_response_text(customer_reply, next_action)
     reason_codes = _dedupe(reason_codes + safety_reasons)
+    logger.step(
+        "final_decision_making",
+        {
+            "final_case_type": case_type,
+            "final_relevant_transaction_id": match.transaction.transaction_id if match.transaction else None,
+            "final_evidence_verdict": verdict,
+            "final_severity": severity,
+            "final_department": department,
+            "final_human_review_required": human_review,
+            "final_confidence": confidence,
+            "reason_codes": reason_codes,
+            "safety_sanitizer_reason_codes": safety_reasons,
+            "llm_text_fields_used": sorted(llm_texts.keys()),
+            "llm_status": llm_status,
+            "decision_priority": "llm_primary_when_called_and_valid",
+        },
+    )
 
     response = AnalyzeTicketResponse(
         ticket_id=request.ticket_id,
@@ -146,7 +221,14 @@ def analyze_ticket(request: AnalyzeTicketRequest) -> AnalyzeTicketResponse:
         confidence=confidence,
         reason_codes=reason_codes,
     )
-    logger.step("final_response", {"response": response})
+    logger.step(
+        "output",
+        {
+            "response": response,
+            "llm_response_status": llm_status,
+        },
+    )
+    logger.close()
     return response
 
 
@@ -261,60 +343,52 @@ def _reconcile_llm_decision(
             {},
         )
 
-    case_type = current_case_type
-    if llm_decision.case_type and llm_decision.case_type != current_case_type:
-        case_type = llm_decision.case_type
-        accepted["case_type"] = {"from": current_case_type.value, "to": case_type.value}
+    case_type = llm_decision.case_type or current_case_type
+    accepted["case_type"] = {"from": current_case_type.value, "to": case_type.value, "source": "llm_primary"}
 
     match = find_relevant_transaction(request, facts, case_type)
-    if accepted.get("case_type"):
-        accepted["rematched_for_llm_case_type"] = {
-            "relevant_transaction_id": match.transaction.transaction_id if match.transaction else None,
-            "ambiguous": match.ambiguous,
-            "reason_codes": match.reason_codes,
-        }
+    accepted["rematched_for_llm_case_type"] = {
+        "relevant_transaction_id": match.transaction.transaction_id if match.transaction else None,
+        "ambiguous": match.ambiguous,
+        "reason_codes": match.reason_codes,
+    }
 
     llm_tx = _find_transaction(request, llm_decision.relevant_transaction_id)
     if llm_decision.relevant_transaction_id and llm_tx is None:
-        rejected["relevant_transaction_id"] = "LLM returned an ID not present in transaction_history"
-    elif llm_tx and _can_accept_llm_transaction(current_match, llm_decision):
+        rejected["relevant_transaction_id"] = "LLM returned an ID not present in transaction_history; using rematched deterministic transaction or null."
+    elif llm_decision.relevant_transaction_id is None:
+        match = MatchResult(None, False, _dedupe(match.reason_codes + ["llm_selected_no_transaction"]), [])
+        accepted["relevant_transaction_id"] = None
+    elif llm_tx:
         duplicate_pair = find_duplicate_pair(request.transaction_history, facts) if case_type == CaseType.duplicate_payment else []
-        match = MatchResult(llm_tx, False, _dedupe(match.reason_codes + ["llm_transaction_assist"]), duplicate_pair)
+        match = MatchResult(llm_tx, False, _dedupe(match.reason_codes + ["llm_transaction_primary"]), duplicate_pair)
         accepted["relevant_transaction_id"] = llm_tx.transaction_id
 
-    verdict = decide_evidence_verdict(request, facts, case_type, match)
-    if _can_accept_llm_verdict(case_type, match, verdict, llm_decision):
-        verdict = llm_decision.evidence_verdict
-        accepted["evidence_verdict"] = verdict.value
-    elif llm_decision.evidence_verdict and llm_decision.evidence_verdict != verdict:
-        rejected["evidence_verdict"] = {
-            "llm": llm_decision.evidence_verdict.value,
-            "deterministic": verdict.value,
-            "reason": "deterministic evidence rules kept authority",
-        }
+    verdict = llm_decision.evidence_verdict or decide_evidence_verdict(request, facts, case_type, match)
+    accepted["evidence_verdict"] = {"value": verdict.value, "source": "llm_primary" if llm_decision.evidence_verdict else "deterministic_fallback"}
 
-    severity = decide_severity(case_type, verdict, match.transaction)
-    if llm_decision.severity and _severity_rank(llm_decision.severity) > _severity_rank(severity):
-        severity = llm_decision.severity
-        accepted["severity"] = severity.value
+    severity = llm_decision.severity or decide_severity(case_type, verdict, match.transaction)
+    accepted["severity"] = {"value": severity.value, "source": "llm_primary" if llm_decision.severity else "deterministic_fallback"}
 
-    department = DEPARTMENT_BY_CASE[case_type]
-    if llm_decision.department and llm_decision.department != department:
-        rejected["department"] = {
-            "llm": llm_decision.department.value,
-            "deterministic": department.value,
-            "reason": "department follows final case_type mapping",
-        }
+    department = llm_decision.department or DEPARTMENT_BY_CASE[case_type]
+    accepted["department"] = {"value": department.value, "source": "llm_primary" if llm_decision.department else "deterministic_fallback"}
 
-    human_review = decide_human_review(case_type, verdict, severity, match)
-    if llm_decision.human_review_required:
+    deterministic_human_review = decide_human_review(case_type, verdict, severity, match)
+    human_review = bool(llm_decision.human_review_required)
+    if deterministic_human_review and not human_review:
         human_review = True
-        accepted["human_review_required"] = True
+        accepted["human_review_required"] = {
+            "value": True,
+            "source": "deterministic_safety_escalation",
+            "llm_value": llm_decision.human_review_required,
+        }
+    else:
+        accepted["human_review_required"] = {"value": human_review, "source": "llm_primary"}
 
-    confidence = round(max(current_confidence, min(0.96, (current_confidence + llm_decision.confidence) / 2 + 0.08)), 2)
+    confidence = round(max(current_confidence, min(0.98, llm_decision.confidence)), 2)
     reasons = _dedupe(
         classification_reasons
-        + ["llm_assisted"]
+        + ["llm_primary"]
         + [code.strip().lower().replace(" ", "_") for code in llm_decision.reason_codes if code.strip()]
     )
     texts = _accepted_llm_texts(llm_decision)
@@ -400,12 +474,30 @@ def _can_accept_llm_verdict(
 def _accepted_llm_texts(llm_decision: LLMDecision) -> dict[str, str]:
     texts: dict[str, str] = {}
     if llm_decision.agent_summary and len(llm_decision.agent_summary.strip()) >= 20:
-        texts["agent_summary"] = llm_decision.agent_summary.strip()
+        texts["agent_summary"] = _normalize_llm_text(llm_decision.agent_summary)
     if llm_decision.recommended_next_action and len(llm_decision.recommended_next_action.strip()) >= 20:
-        texts["recommended_next_action"] = llm_decision.recommended_next_action.strip()
+        texts["recommended_next_action"] = _normalize_llm_text(llm_decision.recommended_next_action)
     if llm_decision.customer_reply and len(llm_decision.customer_reply.strip()) >= 20:
-        texts["customer_reply"] = llm_decision.customer_reply.strip()
+        texts["customer_reply"] = _normalize_llm_text(llm_decision.customer_reply)
     return texts
+
+
+def _normalize_llm_text(text: str) -> str:
+    replacements = {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+    }
+    text = text.strip()
+    for source, replacement in replacements.items():
+        text = text.replace(source, replacement)
+    return text
 
 
 def _severity_rank(severity: Severity) -> int:
@@ -448,3 +540,9 @@ def _dedupe(values: list[str]) -> list[str]:
             seen.add(value)
             result.append(value)
     return result
+
+
+def _model_to_dict(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()

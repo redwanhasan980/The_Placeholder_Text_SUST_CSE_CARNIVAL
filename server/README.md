@@ -85,24 +85,31 @@ Detailed per-ticket logging can be enabled from `.env`:
 
 ```text
 DEBUG_LOG_ENABLED=true
-DEBUG_LOG_TO_CONSOLE=true
-DEBUG_LOG_FILE=logs/decision_debug.log
+DEBUG_LOG_TO_CONSOLE=false
+DEBUG_LOG_DIR=logs/requests
 DEBUG_LOG_LLM_PROMPT=true
 DEBUG_LOG_LLM_OUTPUT=true
 ```
 
-The log shows:
+The logger uses Python `logging` with `structlog` processors when `structlog` is installed. Each valid `POST /analyze-ticket` request creates a separate JSONL file:
 
 ```text
-request metadata and complaint
-normalized extracted facts
-rule-engine decision
-LLM gate decision
-full LLM prompt messages, if enabled
-raw LLM output, if enabled
-parsed LLM decision
-accepted/rejected LLM fields
-final response
+server/logs/requests/<timestamp>_<ticket_id>_<request_id>.jsonl
+```
+
+Each file contains these decision stages:
+
+```text
+log_started
+request_data
+text_facts_extracted
+rule_based_decision
+llm_gate
+llm_prompt
+llm_response
+llm_reconciliation, when an LLM decision is available
+final_decision_making
+output
 ```
 
 Logs may include synthetic complaint text and LLM output. Do not enable verbose logs for real customer data.
