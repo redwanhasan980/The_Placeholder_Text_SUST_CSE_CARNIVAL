@@ -1,0 +1,18 @@
+{
+  "ticket_id": "TKT-001",
+  "relevant_transaction_id": "TXN-9101",
+  "evidence_verdict": "consistent",
+  "case_type": "wrong_transfer",
+  "severity": "high",
+  "department": "dispute_resolution",
+  "agent_summary": "Customer reports a possible wrong transfer involving 5000 BDT via TXN-9101 to +8801719876543.",
+  "recommended_next_action": "Verify TXN-9101 with the customer and handle through the wrong-transfer dispute workflow.",
+  "customer_reply": "We have received your request regarding transaction TXN-9101. Please do not share your PIN or OTP with anyone. Our dispute team will review the case and contact you through official support channels.",
+  "human_review_required": true,
+  "confidence": 0.9,
+  "reason_codes": [
+    "wrong_transfer",
+    "transaction_match",
+    "consistent"
+  ]
+}
